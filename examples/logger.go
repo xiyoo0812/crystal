@@ -5,7 +5,7 @@ import (
 )
 
 func main(){
-	var log = tao.InitLogger(crystal.DEBUG, time.Hour, "./log/", true)
+	var log = crystal.InitLogger(crystal.DEBUG, time.Hour, "./log/", true)
 
 	defer func(){
 		log.Stop()
