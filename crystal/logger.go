@@ -80,18 +80,20 @@ func (ls *logSegment) Close() {
 
 // Logger is the logger type.
 type Logger struct {
-	logger     *log.Logger
-	level      LogLevel
-	segment    *logSegment
-	stopped    int32
-	logPath    string
-	unit       time.Duration
-	isStdout   bool
+	logger     	*log.Logger
+	level      	LogLevel
+	segment    	*logSegment
+	stopped    	int32
+	logPath    	string
+	unit       	time.Duration
+	isStdout   	bool
+	wg		   	*sync.WaitGroup
 }
 
 // Stop stops the logger.
 func (l Logger) Stop() {
 	if atomic.CompareAndSwapInt32(&l.stopped, 0, 1) {
+		l.wg.Wait()
 		if l.segment != nil {
 			l.segment.Close()
 		}
@@ -104,17 +106,21 @@ func (l Logger) Stop() {
 func (l Logger) doPrintf(level LogLevel, format string, v ...interface{}) {
 	if level >= l.level {
 		if l.logger != nil {
+			l.wg.Add(1)
 			funcName, fileName, lineNum := getRuntimeInfo()
 			go func() {
 				format := fmt.Sprintf("%5s [%s] (%s:%d) - %s", tagName[level], path.Base(funcName), path.Base(fileName), lineNum, format)
 				l.logger.Printf(format, v...)
+				l.wg.Done()
 			}()
 		}
 		if l.isStdout {
+			l.wg.Add(1)
 			funcName, fileName, lineNum := getRuntimeInfo()
 			go func() {
 				format := fmt.Sprintf("%5s [%s] (%s:%d) - %s", tagName[level], path.Base(funcName), path.Base(fileName), lineNum, format)
 				log.Printf(format, v...)
+				l.wg.Done()
 			}()
 		}
 	}
@@ -123,19 +129,23 @@ func (l Logger) doPrintf(level LogLevel, format string, v ...interface{}) {
 func (l Logger) doPrintln(level LogLevel, v ...interface{}) {
 	if level >= l.level {
 		if l.logger != nil {
+			l.wg.Add(1)
 			funcName, fileName, lineNum := getRuntimeInfo()
 			go func() {
 				prefix := fmt.Sprintf("%5s [%s] (%s:%d) - ", tagName[level], path.Base(funcName), path.Base(fileName), lineNum)
 				value := fmt.Sprintf("%s%s", prefix, fmt.Sprintln(v...))
 				l.logger.Print(value)
+				l.wg.Done()
 			}()
 		}
 		if l.isStdout {
+			l.wg.Add(1)
 			funcName, fileName, lineNum := getRuntimeInfo()
 			go func(){
 				prefix := fmt.Sprintf("%5s [%s] (%s:%d) - ", tagName[level], path.Base(funcName), path.Base(fileName), lineNum)
 				value := fmt.Sprintf("%s%s", prefix, fmt.Sprintln(v...))
 				log.Print(value)
+				l.wg.Done()
 			}()
 		}
 	}
@@ -148,6 +158,7 @@ func InitLogger(level LogLevel, unit time.Duration, path string, stdout bool) *L
 		logIns.unit = unit
 		logIns.level = level
 		logIns.isStdout = stdout
+		logIns.wg = &sync.WaitGroup{}
 		if len(path) > 0 {
 			logIns.logPath = path
 			logIns.segment = newLogSegment(logIns.unit, path)

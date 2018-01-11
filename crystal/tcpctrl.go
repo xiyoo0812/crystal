@@ -14,7 +14,7 @@ func init() {
 
 // TCPCtrl  is a TCPCtrl to serve TCP requests.
 type TCPCtrl struct {
-	ntype		int16
+	ntype		uint16
 	ctx    		context.Context
 	cancel 		context.CancelFunc
 	conns  		*sync.Map
@@ -26,7 +26,7 @@ type TCPCtrl struct {
 
 // NewTCPCtrl returns a new TCPCtrl which has not started
 // to serve requests yet.
-func NewTCPCtrl(ctx context.Context, connTtype	int16, bufSize uint32) *TCPCtrl {
+func NewTCPCtrl(ctx context.Context, connTtype	uint16, bufSize uint32) *TCPCtrl {
 	if bufSize <= 0 {
 		bufSize = BufferSize256
 	}
@@ -119,7 +119,7 @@ func (s *TCPCtrl) Accept() (bool, error) {
 		Debugf("accepted client %s, id %d, total %d\n", sc.Name(), netid, s.ConnsSize())
 
 		s.wg.Add(1) // this will be Done() in TCPConn.Close()
-		go sc.Start()
+		sc.Start()
 	} // for loop
 	return true, nil
 }
@@ -140,7 +140,7 @@ func (s *TCPCtrl) Connect(address string) (bool, error) {
 	Debugf("connect server %s, id %d, total %d\n", sc.Name(), netid, s.ConnsSize())
 
 	s.wg.Add(1) // this will be Done() in TCPConn.Close()
-	go sc.Start()
+	sc.Start()
 	return true, nil
 }
 

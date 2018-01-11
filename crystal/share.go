@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"reflect"
 	"hash/fnv"
+	"context"
 )
 
 // Error codes returned by failures dealing with server or connection.
@@ -21,10 +22,12 @@ var (
 	ErrBadData       = errors.New("more than 8M data")
 	ErrServerClosed  = errors.New("server has been closed")
 	ErrAreadyListen  = errors.New("server aready Listened")
+	ErrMsgLength  	 = errors.New("message length error")
 
 	ConnectFuncImpl ConnectFunc
 	MessageFuncImpl MessageFunc
 	CloseFuncImpl 	CloseFunc
+	TaskFuncImpl 	TaskFunc
 )
 
 // definitions about some constants.
@@ -35,12 +38,15 @@ const (
 	BufferSize512     = 512
 	BufferSize1024    = 1024
 	MaxMessageQueue	 = 16
+	MaxTaskQueue		 = 32
 	defaultWorkersNum = 20
 )
 
 type ConnectFunc func(*TcpConn)
 type MessageFunc func(*Message, *TcpConn)
+type TaskFunc func(context.Context, *TcpConn)
 type CloseFunc func(*TcpConn)
+
 type workerFunc func()
 
 // ErrUndefined for undefined message type.
@@ -58,6 +64,11 @@ func SetConnectFunc(connect ConnectFunc) {
 // MessageFunc sets a callback
 func SetMessageFunc(message MessageFunc) {
 	MessageFuncImpl = message
+}
+
+// MessageFunc sets a callback
+func SetTaskFunc(task TaskFunc) {
+	TaskFuncImpl = task
 }
 
 // CloseFunc sets a callback

@@ -18,11 +18,13 @@ type TcpConn struct {
 	netid   int64
 	heart   int64
 	name    string
+	encry 	*Encryptor
 	once    *sync.Once
 	wg   	*sync.WaitGroup
 	mu		sync.Mutex
 	ctrl	*TCPCtrl
 	rawConn net.Conn
+	taskCh	chan context.Context
 	sendCh  chan []byte
 	handCh 	chan *Message
 	ctx     context.Context
@@ -40,7 +42,9 @@ func NewTcpConn(id int64, ct *TCPCtrl, c net.Conn) *TcpConn {
 		wg:        	&sync.WaitGroup{},
 		sendCh:    	make(chan []byte, ct.bufferSize),
 		handCh: 	make(chan *Message, MaxMessageQueue),
+		taskCh: 	make(chan context.Context, MaxTaskQueue),
 		heart:     	time.Now().UnixNano(),
+		encry:		new(Encryptor),
 	}
 	sc.ctx, sc.cancel = context.WithCancel(ct.ctx)
 	sc.name = c.RemoteAddr().String()
@@ -67,6 +71,11 @@ func (tc *TcpConn) HeartBeat() int64 {
 	return tc.heart
 }
 
+// returns Type of server connection.
+func (tc *TcpConn) Type() uint16 {
+	return tc.ctrl.ntype
+}
+
 // RemoteAddr returns the remote address of server connection.
 func (tc *TcpConn) RemoteAddr() net.Addr {
 	return tc.rawConn.RemoteAddr()
@@ -80,9 +89,6 @@ func (tc *TcpConn) LocalAddr() net.Addr {
 // Start starts the server connection, creating go-routines for reading, writing and handlng.
 func (tc *TcpConn) Start() {
 	Infof("conn start, <%v -> %v>\n", tc.rawConn.LocalAddr(), tc.rawConn.RemoteAddr())
-	if ConnectFuncImpl != nil {
-		ConnectFuncImpl(tc)
-	}
 	loopers := []func(*TcpConn, *sync.WaitGroup){readLoop, writeLoop, handleLoop}
 	for _, l := range loopers {
 		looper := l
@@ -112,9 +118,15 @@ func (tc *TcpConn) Close() {
 		// close all channels and block until all go-routines exited.
 		close(tc.sendCh)
 		close(tc.handCh)
+		close(tc.taskCh)
 		// close connection from parent
 		tc.ctrl.CloseConn(tc.netid)
 	})
+}
+
+// Task put a task to the client.
+func (sc *TcpConn) Task(ctx context.Context) {
+	sc.taskCh <- ctx
 }
 
 // Write writes a message to the client.
@@ -146,7 +158,6 @@ func readLoop(sc *TcpConn, wg *sync.WaitGroup) {
 			Errorf("readLoop panics: %v\n", p)
 		}
 		wg.Done()
-		Debugln("readLoop go-routine exited")
 		sc.Close()
 	}()
 	for {
@@ -154,7 +165,7 @@ func readLoop(sc *TcpConn, wg *sync.WaitGroup) {
 		case <-sc.ctx.Done(): // connection closed
 			return
 		default:
-			msg, err := DecodeMessag(sc.rawConn)
+			msg, err := DecodeMessag(sc)
 			if err != nil {
 				Errorf("error decoding message %v\n", err)
 				return
@@ -172,7 +183,6 @@ func writeLoop(sc *TcpConn, wg *sync.WaitGroup) {
 			Errorf("writeLoop panics: %v\n", p)
 		}
 		wg.Done()
-		Debugln("writeLoop go-routine exited")
 		sc.Close()
 	}()
 	for {
@@ -197,21 +207,30 @@ func handleLoop(sc *TcpConn, wg *sync.WaitGroup) {
 		if p := recover(); p != nil {
 			Errorf("handleLoop panics: %v\n", p)
 		}
-		wg.Done()
-		Debugln("handleLoop go-routine exited")
 		sc.Close()
+		wg.Done()
 	}()
+	//处理协程返回
+	if ConnectFuncImpl != nil {
+		ConnectFuncImpl(sc)
+	}
 	for {
 		select {
 		case <-sc.ctx.Done(): // connection closed
 			return
+		case ctx := <-sc.taskCh:
+			if TaskFuncImpl != nil {
+				TaskFuncImpl(ctx, sc)
+			} else {
+				Warnln("no handler for task %d\n")
+			}
 		case msg := <-sc.handCh:
 			handler := GetMeaageHandler(msg.MsgId)
 			if handler == nil {
 				if MessageFuncImpl != nil {
 					MessageFuncImpl(msg, sc)
 				} else {
-					Warnf("no handler or onMessage() found for message %d\n", msg.MsgId)
+					Warnf("no handler for message %d\n", msg.MsgId)
 				}
 				continue
 			} else {
