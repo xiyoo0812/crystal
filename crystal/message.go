@@ -10,16 +10,19 @@ import (
 
 // MessageHeadLength is the length of type header.
 const (
-	//消息标志位
-	MsgFlagEncr	uint8	= 1		//加密
-	MsgFlagComp	uint8	= 2		//压缩
-	MsgFlagBoard	uint8	= 4		//广播
-	MsgFlagGroup	uint8	= 8		//指定组发
-	//消息类型位（兼容c++代码，暂定4/5）
+	//消息标志位（兼容c++老代码，暂定）
+	MsgFlagEncr	uint8	= 0x01		//加密
+	MsgFlagBoard	uint8	= 0x02		//广播
+	MsgFlagGroup	uint8	= 0x04		//指定组发
+	MsgFlagComp	uint8	= 0x20		//压缩
+	MsgFlagSmall	uint8	= 0x40		//超小包
+	MsgFlagLittle	uint8	= 0x80		//小包
+	//消息类型位（兼容c++老代码，暂定）
 	MsgClsTrans	uint8	= 4		//需要转发的协议
 	MsgClsSelf 	uint8	= 5		//自己处理协议
 	//消息头长度
-	MsgHeadLen	 	uint16 	= uint16(unsafe.Sizeof(uint16(0))) * 2 + uint16(unsafe.Sizeof(uint64(0))) + uint16(unsafe.Sizeof(uint8(0))) * 3
+	MsgHeadLen	 	uint16 	= uint16(unsafe.Sizeof(uint16(0))) * 2 + uint16(unsafe.Sizeof(uint8(0))) * 3
+	MsgHeadLenBig 	uint16 	= uint16(unsafe.Sizeof(uint64(0)))
 )
 
 // HandlerFunc serves as an adapter to allow the use of ordinary functions as handlers.
@@ -80,22 +83,31 @@ func DecodeMessag(conn *TcpConn) (*Message, error) {
 	if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgCode); err != nil {
 		return nil, err
 	}
-	if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgCtx); err != nil {
-		return nil, err
+	bodyLen := message.MsgLen - MsgHeadLen
+	if !message.HasFlag(MsgFlagLittle) {
+		headBytes := make([]byte, MsgHeadLenBig)
+		_, err = io.ReadFull(raw, headBytes)
+		if err != nil {
+			return nil, err
+		}
+		headBuf := bytes.NewReader(headBytes)
+		if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgCtx); err != nil {
+			return nil, err
+		}
+		bodyLen -=MsgHeadLenBig
+		conn.encry.SetRecvKey(uint32(message.MsgCtx))
 	}
 	// read application data
-	msgBytes := make([]byte, message.BodyLen())
+	msgBytes := make([]byte, bodyLen)
 	_, err = io.ReadFull(raw, msgBytes)
 	if err != nil {
 		return nil, err
 	}
-	encry := conn.encry
-	encry.SetRecvKey(uint32(message.MsgCtx))
 	if message.HasFlag(MsgFlagEncr) {
-		if buff := encry.Decode(msgBytes, message.MsgCode); buff != nil {
+		if buff := conn.encry.Decode(msgBytes, message.MsgCode); buff != nil {
 			message.Msgbuf.Write(buff)
 		} else {
-			Errorf("encry decode message %d twice", message.MsgId)
+			Errorf("encry decode message %d error", message.MsgId)
 			return nil, nil
 		}
 	} else {
@@ -137,18 +149,22 @@ func DecodeSliceMessag(slice []byte) *Message {
 		Errorf("decode slice message error: %s", err)
 		return nil
 	}
-	if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgCtx); err != nil {
-		Errorf("decode slice message error: %s", err)
-		return nil
+	headLen := MsgHeadLen
+	if !message.HasFlag(MsgFlagLittle) {
+		if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgCtx); err != nil {
+			Errorf("decode slice message error: %s", err)
+			return nil
+		}
+		headLen += MsgHeadLenBig
 	}
 	// read application data
-	message.Msgbuf.Write(slice[message.MsgLen:])
+	message.Msgbuf.Write(slice[headLen:])
 	return &message
 }
 
 func EncodeMessage(m *Message) ([]byte, error) {
+	m.CheckSize()
 	var msgbuf bytes.Buffer
-	m.MsgLen = uint16(m.Msgbuf.Len()) + MsgHeadLen
 	if err := binary.Write(&msgbuf, binary.LittleEndian, m.MsgLen); err != nil {
 		return nil, err
 	}
@@ -164,8 +180,10 @@ func EncodeMessage(m *Message) ([]byte, error) {
 	if err := binary.Write(&msgbuf, binary.LittleEndian, m.MsgCode); err != nil {
 		return nil, err
 	}
-	if err := binary.Write(&msgbuf, binary.LittleEndian, m.MsgCtx); err != nil {
-		return nil, err
+	if !m.HasFlag(MsgFlagLittle) {
+		if err := binary.Write(&msgbuf, binary.LittleEndian, m.MsgCtx); err != nil {
+			return nil, err
+		}
 	}
 	if err := binary.Write(&msgbuf, binary.LittleEndian, m.Msgbuf.Bytes()); err != nil {
 		return nil, err
@@ -200,15 +218,11 @@ func (m *Message) RemoveFlag(flag uint8) {
 	m.MsgFlag ^= flag
 }
 
-
-//消息体size
-func (m Message) BodyLen() uint16 {
-	return m.MsgLen - MsgHeadLen
-}
-
-//消息size
-func (m Message) Size() uint16 {
-	return uint16(m.Msgbuf.Len()) + MsgHeadLen
+func (m *Message) CheckSize(){
+	m.MsgLen = uint16(m.Msgbuf.Len()) + MsgHeadLen
+	if !m.HasFlag(MsgFlagLittle) {
+		m.MsgLen += MsgHeadLenBig
+	}
 }
 
 //生产一个消息

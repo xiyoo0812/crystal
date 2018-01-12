@@ -164,6 +164,21 @@ func (e *Encryptor) SetRecvKey(key uint32){
 	}
 }
 
+func (e *Encryptor) EncodeMessage(message *Message) *Message {
+	if e.dwSendXorKey == 0 {
+		e.dwSendXorKey = uint32(C.BuildSendKey())
+		message.MsgCtx = uint64(e.dwSendXorKey)
+		message.AddFlag(MsgFlagEncr)
+	} else {
+		message.AddFlag(MsgFlagEncr | MsgFlagLittle)
+	}
+	buff := message.Msgbuf.Bytes()
+	message.MsgCode = uint8(C.Encode((*C.BYTE)(unsafe.Pointer(&buff[0])), C.uint16(len(buff)), C.uint32(e.dwSendXorKey),  (*C.BYTE)(unsafe.Pointer(&e.cbSendRound))))
+	message.Msgbuf.Reset()
+	message.Msgbuf.Write(buff)
+	return message
+}
+
 func (e *Encryptor) Encode(buff []byte) ([]byte, uint8){
 	if e.dwSendXorKey == 0 {
 		e.dwSendXorKey = uint32(C.BuildSendKey())

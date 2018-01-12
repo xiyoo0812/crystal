@@ -88,6 +88,12 @@ type Logger struct {
 	unit       	time.Duration
 	isStdout   	bool
 	wg		   	*sync.WaitGroup
+	mut 		bool
+}
+
+// set the logger mut thread
+func (l Logger) MutThread(bm bool) {
+	l.mut = bm
 }
 
 // Stop stops the logger.
@@ -106,22 +112,36 @@ func (l Logger) Stop() {
 func (l Logger) doPrintf(level LogLevel, format string, v ...interface{}) {
 	if level >= l.level {
 		if l.logger != nil {
-			l.wg.Add(1)
 			funcName, fileName, lineNum := getRuntimeInfo()
-			go func() {
+			realRogger := func(){
 				format := fmt.Sprintf("%5s [%s] (%s:%d) - %s", tagName[level], path.Base(funcName), path.Base(fileName), lineNum, format)
 				l.logger.Printf(format, v...)
-				l.wg.Done()
-			}()
+			}
+			if l.mut {
+				l.wg.Add(1)
+				go func(){
+					realRogger()
+					l.wg.Done()
+				}()
+			} else {
+				realRogger()
+			}
 		}
 		if l.isStdout {
-			l.wg.Add(1)
 			funcName, fileName, lineNum := getRuntimeInfo()
-			go func() {
+			realRogger := func(){
 				format := fmt.Sprintf("%5s [%s] (%s:%d) - %s", tagName[level], path.Base(funcName), path.Base(fileName), lineNum, format)
 				log.Printf(format, v...)
-				l.wg.Done()
-			}()
+			}
+			if l.mut {
+				l.wg.Add(1)
+				go func(){
+					realRogger()
+					l.wg.Done()
+				}()
+			} else {
+				realRogger()
+			}
 		}
 	}
 }
@@ -129,24 +149,38 @@ func (l Logger) doPrintf(level LogLevel, format string, v ...interface{}) {
 func (l Logger) doPrintln(level LogLevel, v ...interface{}) {
 	if level >= l.level {
 		if l.logger != nil {
-			l.wg.Add(1)
 			funcName, fileName, lineNum := getRuntimeInfo()
-			go func() {
+			realRogger := func(){
 				prefix := fmt.Sprintf("%5s [%s] (%s:%d) - ", tagName[level], path.Base(funcName), path.Base(fileName), lineNum)
 				value := fmt.Sprintf("%s%s", prefix, fmt.Sprintln(v...))
 				l.logger.Print(value)
-				l.wg.Done()
-			}()
+			}
+			if l.mut {
+				l.wg.Add(1)
+				go func(){
+					realRogger()
+					l.wg.Done()
+				}()
+			} else {
+				realRogger()
+			}
 		}
 		if l.isStdout {
-			l.wg.Add(1)
 			funcName, fileName, lineNum := getRuntimeInfo()
-			go func(){
+			realRogger := func(){
 				prefix := fmt.Sprintf("%5s [%s] (%s:%d) - ", tagName[level], path.Base(funcName), path.Base(fileName), lineNum)
 				value := fmt.Sprintf("%s%s", prefix, fmt.Sprintln(v...))
 				log.Print(value)
-				l.wg.Done()
-			}()
+			}
+			if l.mut {
+				l.wg.Add(1)
+				go func(){
+					realRogger()
+					l.wg.Done()
+				}()
+			} else {
+				realRogger()
+			}
 		}
 	}
 }
@@ -155,6 +189,7 @@ func (l Logger) doPrintln(level LogLevel, v ...interface{}) {
 func InitLogger(level LogLevel, unit time.Duration, path string, stdout bool) *Logger {
 	if atomic.CompareAndSwapInt32(&started, 0, 1) {
 		logIns = &Logger{}
+		logIns.mut = false
 		logIns.unit = unit
 		logIns.level = level
 		logIns.isStdout = stdout

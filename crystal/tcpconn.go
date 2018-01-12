@@ -130,6 +130,11 @@ func (sc *TcpConn) Task(ctx context.Context) {
 }
 
 // Write writes a message to the client.
+func (sc *TcpConn) EncryptWrite(message *Message) error {
+	return sc.Write(sc.encry.EncodeMessage(message))
+}
+
+// Write writes a message to the client.
 func (sc *TcpConn) Write(message *Message) error {
 	//return asyncWrite(sc, message)
 	pkt, err := EncodeMessage(message)
@@ -167,7 +172,7 @@ func readLoop(sc *TcpConn, wg *sync.WaitGroup) {
 		default:
 			msg, err := DecodeMessag(sc)
 			if err != nil {
-				Errorf("error decoding message %v\n", err)
+				Errorf("error decoding message %v", err)
 				return
 			}
 			sc.SetHeartBeat(time.Now().UnixNano())
