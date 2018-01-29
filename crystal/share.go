@@ -42,10 +42,10 @@ const (
 	defaultWorkersNum = 20
 )
 
-type ConnectFunc func(*TcpConn)
-type MessageFunc func(*Message, *TcpConn)
-type TaskFunc func(context.Context, *TcpConn)
-type CloseFunc func(*TcpConn)
+type ConnectFunc func(*NetConn)
+type MessageFunc func(*Message, *NetConn)
+type TaskFunc func(context.Context, *NetConn)
+type CloseFunc func(*NetConn)
 
 type workerFunc func()
 

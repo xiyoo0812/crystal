@@ -20,22 +20,27 @@ func init() {
 /* 'expiration' is the time when timer time out, if 'interval' > 0
 the timer will time out periodically, 'timeout' contains the callback
 to be called when times out */
-type timer struct {
-	id         	int64
+type Timer struct {
+	Id         	int64
+	Chan 		chan int64
 	expiration 	time.Time
 	interval   	time.Duration
-	timerChan 	chan int64
 }
 
-func (t *timer) isRepeat() bool {
+func (t *Timer) isRepeat() bool {
 	return int64(t.interval) > 0
 }
 
+func (t *Timer) Close() {
+	TimerWheelInstance().UnregTimer(t.Id)
+	close(t.Chan)
+}
+
 // timerHeap is a heap-based priority queue
-type timerHeap []*timer
+type timerHeap []*Timer
 func (th timerHeap) Remove(id int64) int {
 	for i, t := range th {
-		if t.id == id {
+		if t.Id == id {
 			heap.Remove(&th, i)
 		}
 	}
@@ -55,7 +60,7 @@ func (th timerHeap) Swap(i, j int) {
 }
 
 func (th *timerHeap) Push(x interface{}) {
-	tr := x.(*timer)
+	tr := x.(*Timer)
 	*th = append(*th, tr)
 }
 
@@ -72,7 +77,7 @@ type TimerWheel struct {
 	timers      timerHeap
 	ticker      *time.Ticker
 	wg          *sync.WaitGroup
-	regChan     chan *timer		// reg timer in loop
+	regChan     chan *Timer		// reg timer in loop
 	unregChan   chan int64      	// unreg timer in loop
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -82,7 +87,7 @@ type TimerWheel struct {
 func NewTimerWheel(ctx context.Context, interval time.Duration) *TimerWheel {
 	if globalTimerWheel == nil {
 		timerWheel := &TimerWheel{
-			regChan	: make(chan *timer, bufferSize),
+			regChan	: make(chan *Timer, bufferSize),
 			unregChan: make(chan int64, bufferSize),
 			ticker	: time.NewTicker(time.Millisecond * interval),
 			timers	: make(timerHeap, 0),
@@ -100,23 +105,35 @@ func NewTimerWheel(ctx context.Context, interval time.Duration) *TimerWheel {
 	return globalTimerWheel
 }
 
-func newTimer(elapsed time.Duration, interv time.Duration, ch chan int64) *timer {
-	return &timer{
-		id 			: timerIds.GetAndIncrement(),
+func NewTimer(elapsed time.Duration, interv time.Duration) *Timer {
+	return &Timer{
+		Id 			: timerIds.GetAndIncrement(),
 		expiration	: time.Now().Add(elapsed * time.Millisecond),
 		interval	: interv * time.Millisecond,
-		timerChan	: ch,
+		Chan		: make(chan int64),
 	}
 }
 
-// RegTimer adds new timed task.
-func (tw *TimerWheel) RegTimer(elapsed time.Duration, interv time.Duration, ch chan int64) int64 {
-	if ch == nil {
-		return int64(-1)
+// AddTimer adds new timed task.
+func (tw *TimerWheel) AddTimer(t *Timer, elapsed time.Duration) bool {
+	if t.Id > 0 && t.Chan != nil{
+		t.expiration = time.Now().Add(elapsed * time.Millisecond)
+		tw.regChan <- t
+		return true
 	}
-	tr := newTimer(elapsed, interv, ch)
+	return false
+}
+
+// RegTimer adds new timed task.
+func (tw *TimerWheel) RegTimer(elapsed time.Duration, interv time.Duration) *Timer {
+	tr := NewTimer(elapsed, interv)
 	tw.regChan <- tr
-	return tr.id
+	return tr
+}
+
+// DeleteTimer cancels a timed task with specified timer ID.
+func (tw *TimerWheel) DeleteTimer(t *Timer) {
+	tw.unregChan <- t.Id
 }
 
 // UnregTimer cancels a timed task with specified timer ID.
@@ -130,13 +147,13 @@ func (tw *TimerWheel) Stop() {
 	tw.wg.Wait()
 }
 
-func (tw *TimerWheel) getExpired() []*timer {
-	expired := make([]*timer, 0)
+func (tw *TimerWheel) getExpired() []*Timer {
+	expired := make([]*Timer, 0)
 	for tw.timers.Len() > 0 {
-		tr := heap.Pop(&tw.timers).(*timer)
+		tr := heap.Pop(&tw.timers).(*Timer)
 		elapsed := time.Since(tr.expiration).Seconds()
 		if elapsed > 1.0 {
-			Warnf("timer %d elapsed %f second\n", tr.id, elapsed)
+			Warnf("timer %d elapsed %f second\n", tr.Id, elapsed)
 		}
 		if elapsed > 0.0 {
 			expired = append(expired, tr)
@@ -149,7 +166,7 @@ func (tw *TimerWheel) getExpired() []*timer {
 	return expired
 }
 
-func (tw *TimerWheel) update(timers []*timer) {
+func (tw *TimerWheel) update(timers []*Timer) {
 	if timers != nil {
 		for _, t := range timers {
 			if t.isRepeat() { // repeatable timer task
@@ -179,7 +196,7 @@ func (tw *TimerWheel) start() {
 		case <-tw.ticker.C:
 			timers := tw.getExpired()
 			for _, t := range timers {
-				t.timerChan <- t.id
+				t.Chan <- t.Id
 			}
 			tw.update(timers)
 		}
