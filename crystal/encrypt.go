@@ -167,7 +167,7 @@ func (e *Encryptor) SetRecvKey(key uint32){
 func (e *Encryptor) EncodeMessage(message *Message) *Message {
 	if e.dwSendXorKey == 0 {
 		e.dwSendXorKey = uint32(C.BuildSendKey())
-		message.MsgCtx = uint64(e.dwSendXorKey)
+		message.MsgCtx = e.dwSendXorKey
 	}
 	message.AddFlag(MsgFlagEncr)
 	buff := message.Msgbuf.Bytes()

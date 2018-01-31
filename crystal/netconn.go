@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 	"context"
+	"websocket"
 )
 
 // NetConn represents a connection to a TCP server, it implments Conn.
@@ -19,6 +20,7 @@ type NetConn struct {
 	mu		sync.Mutex
 	ctrl	*ConnCtrl
 	rawConn net.Conn
+	webConn *websocket.Conn
 	taskCh	chan context.Context
 	sendCh  chan []byte
 	handCh 	chan *Message
@@ -32,6 +34,25 @@ func NewNetConn(id int64, ct *ConnCtrl, c net.Conn) *NetConn {
 	sc := &NetConn{
 		netid:    	id,
 		rawConn:   	c,
+		ctrl:		ct,
+		once:      	&sync.Once{},
+		wg:        	&sync.WaitGroup{},
+		send:      	&sync.WaitGroup{},
+		sendCh:    	make(chan []byte, ct.bufferSize),
+		handCh: 	make(chan *Message, MaxMessageQueue),
+		taskCh: 	make(chan context.Context, MaxTaskQueue),
+		heart:     	time.Now().UnixNano(),
+		encry:		new(Encryptor),
+	}
+	sc.ctx, sc.cancel = context.WithCancel(ct.ctx)
+	sc.name = c.RemoteAddr().String()
+	return sc
+}
+
+func NewWebConn(id int64, ct *ConnCtrl, c *websocket.Conn) *NetConn {
+	sc := &NetConn{
+		netid:    	id,
+		webConn:   	c,
 		ctrl:		ct,
 		once:      	&sync.Once{},
 		wg:        	&sync.WaitGroup{},
@@ -74,17 +95,23 @@ func (tc *NetConn) Type() uint16 {
 
 // RemoteAddr returns the remote address of server connection.
 func (tc *NetConn) RemoteAddr() net.Addr {
-	return tc.rawConn.RemoteAddr()
+	if tc.rawConn != nil {
+		return tc.rawConn.RemoteAddr()
+	}
+	return tc.webConn.RemoteAddr()
 }
 
 // LocalAddr returns the local address of server connection.
 func (tc *NetConn) LocalAddr() net.Addr {
-	return tc.rawConn.LocalAddr()
+	if tc.rawConn != nil {
+		return tc.rawConn.LocalAddr()
+	}
+	return tc.webConn.LocalAddr()
 }
 
 // Start starts the server connection, creating go-routines for reading, writing and handlng.
 func (tc *NetConn) Start() {
-	Infof("conn start, <%v -> %v>\n", tc.rawConn.LocalAddr(), tc.rawConn.RemoteAddr())
+	Infof("conn start, <%v -> %v>\n", tc.LocalAddr(), tc.RemoteAddr())
 	tc.wg.Add(1)
 	go readLoop(tc, tc.wg)
 	tc.wg.Add(1)
@@ -97,11 +124,16 @@ func (tc *NetConn) Start() {
 func (tc *NetConn) Close() {
 	tc.once.Do(func() {
 		// close net.Conn, any blocked read or write operation will be unblocked and return errors.
-		if nc, ok := tc.rawConn.(*net.TCPConn); ok {
-			// avoid time-wait state
-			nc.SetLinger(0)
+		if tc.rawConn != nil {
+			if nc, ok := tc.rawConn.(*net.TCPConn); ok {
+				// avoid time-wait state
+				nc.SetLinger(0)
+			}
+			tc.rawConn.Close()
 		}
-		tc.rawConn.Close()
+		if tc.webConn != nil {
+			tc.webConn.Close()
+		}
 		// cancel readLoop, writeLoop and handleLoop go-routines.
 		tc.cancel()
 		// wait until all go-routines exited.
@@ -121,31 +153,28 @@ func (sc *NetConn) Task(ctx context.Context) {
 }
 
 // Write writes a message to the client.
-func (sc *NetConn) EncryptWrite(message *Message) error {
+func (sc *NetConn) EncryptWrite(message *Message) bool {
 	return sc.Write(sc.encry.EncodeMessage(message))
 }
 
 // Write writes a message to the client.
-func (sc *NetConn) Write(message *Message) error {
-	var err error
+func (sc *NetConn) Write(message *Message) bool {
 	pkt := EncodeMessage(message)
 	if pkt == nil {
-		Errorf("NetConn Write error : encode message\n")
-		return err
+		Warnf("NetConn Write Warning : encode message error\n")
+		return false
 	}
 	defer func() {
-		if p := recover(); p != nil {
-			err = ErrServerClosed
-		}
+		if p := recover(); p != nil {}
 	}()
 	select {
 	case sc.sendCh <- pkt:
 		sc.send.Add(1)
-		err = nil
+		return true
 	default:
-		err = ErrWouldBlock
+		Errorf("NetConn Write Block\n")
 	}
-	return err
+	return false
 }
 
 /* readLoop() blocking read from connection, deserialize bytes into message, then find corresponding handler, put it into channel */
@@ -162,12 +191,20 @@ func readLoop(sc *NetConn, wg *sync.WaitGroup) {
 		case <-sc.ctx.Done(): // connection closed
 			return
 		default:
-			if msg := DecodeMessag(sc); msg == nil {
-				Errorf("error decoding message")
-				return
+			if sc.rawConn != nil {
+				if msg := DecodeMessag(sc); msg == nil {
+					return
+				} else {
+					sc.SetHeartBeat(time.Now().UnixNano())
+					sc.handCh <- msg
+				}
 			} else {
-				sc.SetHeartBeat(time.Now().UnixNano())
-				sc.handCh <- msg
+				if msg := DecodeWebMessag(sc); msg == nil {
+					return
+				} else {
+					sc.SetHeartBeat(time.Now().UnixNano())
+					sc.handCh <- msg
+				}
 			}
 		}
 	}
@@ -187,9 +224,16 @@ func writeLoop(sc *NetConn, wg *sync.WaitGroup) {
 		select {
 		case pkt = <-sc.sendCh:
 			if pkt != nil {
-				if _, err := sc.rawConn.Write(pkt); err != nil {
-					Errorf("error writing data %v\n", err)
-					return
+				if sc.rawConn != nil {
+					if _, err := sc.rawConn.Write(pkt); err != nil {
+						Errorf("error writing data %v\n", err)
+						return
+					}
+				} else {
+					if err := sc.webConn.WriteMessage(websocket.BinaryMessage, pkt); err != nil {
+						Errorf("error web writing data %v\n", err)
+						return
+					}
 				}
 				sc.send.Done()
 			}

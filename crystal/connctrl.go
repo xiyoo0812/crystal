@@ -1,7 +1,6 @@
 package crystal
 
 import (
-	"fmt"
 	"net"
 	"sync"
 	"context"
@@ -61,21 +60,18 @@ func (s *ConnCtrl) ConnsSize() int {
 func (s *ConnCtrl) Broadcast(msg *Message) {
 	s.conns.Range(func(k, v interface{}) bool {
 		c := v.(*NetConn)
-		if err := c.Write(msg); err != nil {
-			Errorf("broadcast error %v, conn id %d", err, k.(int64))
-			return false
-		}
-		return true
+		return c.Write(msg)
 	})
 }
 
 // Unicast unicasts message to a specified conn.
-func (s *ConnCtrl) Unicast(id int64, msg *Message) error {
+func (s *ConnCtrl) Unicast(id int64, msg *Message) bool {
 	v, ok := s.conns.Load(id)
 	if ok {
 		return v.(*NetConn).Write(msg)
 	}
-	return fmt.Errorf("conn id %d not found", id)
+	Warnf("conn id %d not found", id)
+	return false
 }
 
 // Conn returns a ConnCtrl connection with specified ID.
@@ -104,14 +100,27 @@ func (s *ConnCtrl) Websocket(address, url string) (bool, error) {
 	if s.listener != nil {
 		return false, ErrAreadyListen
 	}
-	wsHandler := func(rawConn *websocket.Conn) {
-		netid := netIdentifier.GetAndIncrement()
-		sc := NewNetConn(netid, s, rawConn)
-		s.conns.Store(netid, sc)
-		s.wg.Add(1) // this will be Done() in TCPConn.Close()
-		sc.Start()
+	wsHandler := func(w http.ResponseWriter, r *http.Request) {
+		var upgrader = websocket.Upgrader{
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
+			CheckOrigin : func(r *http.Request) bool {
+				// allow all connections by default
+				return true
+			},
+		}
+		if rawConn, err := upgrader.Upgrade(w, r, nil); err != nil{
+			Errorln("Websocket Upgrade Failed:", err)
+			return
+		} else {
+			netid := netIdentifier.GetAndIncrement()
+			sc := NewWebConn(netid, s, rawConn)
+			s.conns.Store(netid, sc)
+			s.wg.Add(1) // this will be Done() in TCPConn.Close()
+			sc.Start()
+		}
 	}
-	http.Handle(url, websocket.Handler(wsHandler))
+	http.HandleFunc(url, wsHandler)
 	err := http.ListenAndServe(address, nil)
 	if err != nil {
 		return false, err

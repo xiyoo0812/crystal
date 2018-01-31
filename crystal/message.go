@@ -6,23 +6,20 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"websocket"
 )
 
 // MessageHeadLength is the length of type header.
 const (
-	//消息标志位（兼容c++老代码，暂定）
+	//消息标志位
 	MsgFlagEncr	uint8	= 0x01		//加密
 	MsgFlagBoard	uint8	= 0x02		//广播
 	MsgFlagGroup	uint8	= 0x04		//指定组发
-	MsgFlagComp	uint8	= 0x20		//压缩
-	MsgFlagSmall	uint8	= 0x40		//超小包
-	MsgFlagLittle	uint8	= 0x80		//小包
-	//消息类型位（兼容c++老代码，暂定）
-	MsgClsTrans	uint8	= 4		//需要转发的协议
-	MsgClsSelf 	uint8	= 5		//自己处理协议
+	MsgFlagComp	uint8	= 0x08		//压缩
+	MsgFlagLittle	uint8	= 0x10		//小包
 	//消息头长度
-	MsgHeadLen	 	uint16 	= uint16(unsafe.Sizeof(uint16(0))) * 2 + uint16(unsafe.Sizeof(uint8(0))) * 3
-	MsgHeadLenBig 	uint16 	= uint16(unsafe.Sizeof(uint64(0)))
+	MsgHeadLen	 	uint16 	= uint16(unsafe.Sizeof(uint16(0))) * 2 + uint16(unsafe.Sizeof(uint8(0))) * 2
+	MsgHeadLenBig 	uint16 	= uint16(unsafe.Sizeof(uint32(0)))
 )
 
 // HandlerFunc serves as an adapter to allow the use of ordinary functions as handlers.
@@ -58,6 +55,63 @@ func GetMeaageHandler(msgId uint16) HandlerFunc {
 }
 
 // Decode decodes the bytes data into Message
+func DecodeWebMessag(conn *NetConn) *Message {
+	raw := conn.webConn
+	var message Message
+	if mtype, readBytes, err := raw.ReadMessage(); err != nil{
+		Errorf("error decoding web message %v", err)
+		return nil
+	} else if mtype == websocket.CloseMessage {
+		return nil
+	} else if mtype == websocket.BinaryMessage {
+		for len(readBytes) < int(message.MsgLen) {
+			if mtype, newBytes, err := raw.ReadMessage(); err != nil {
+				return nil
+			} else if mtype == websocket.BinaryMessage {
+				readBytes = append(readBytes, newBytes ...)
+			}
+		}
+		headBuf := bytes.NewReader(readBytes[0 : MsgHeadLen+MsgHeadLenBig])
+		if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgLen); err != nil {
+			Errorf("error decoding message %v", err)
+			return nil
+		}
+		if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgFlag); err != nil {
+			Errorf("error decoding message %v", err)
+			return nil
+		}
+		if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgId); err != nil {
+			Errorf("error decoding message %v", err)
+			return nil
+		}
+		if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgCode); err != nil {
+			Errorf("error decoding message %v", err)
+			return nil
+		}
+		headLen := MsgHeadLen
+		if !message.HasFlag(MsgFlagLittle) {
+			headLen += MsgHeadLenBig
+			if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgCtx); err != nil {
+				Errorf("error decoding message %v", err)
+				return nil
+			}
+		}
+		msgBytes := readBytes[headLen : ]
+		if message.HasFlag(MsgFlagEncr) {
+			if buff := conn.encry.Decode(msgBytes, message.MsgCode); buff != nil {
+				message.Msgbuf.Write(buff)
+			} else {
+				Errorf("encry decode message %d error", message.MsgId)
+				return nil
+			}
+		} else {
+			message.Msgbuf.Write(msgBytes)
+		}
+	}
+	return &message
+}
+
+// Decode decodes the bytes data into Message
 func DecodeMessag(conn *NetConn) *Message {
 	// read header data
 	raw := conn.rawConn
@@ -67,6 +121,7 @@ func DecodeMessag(conn *NetConn) *Message {
 		Errorf("error decoding message %v", err)
 		return nil
 	}
+	Errorln("decoding message0", headBytes)
 	var message Message
 	headBuf := bytes.NewReader(headBytes)
 	if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgLen); err != nil {
@@ -74,10 +129,6 @@ func DecodeMessag(conn *NetConn) *Message {
 		return nil
 	}
 	if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgFlag); err != nil {
-		Errorf("error decoding message %v", err)
-		return nil
-	}
-	if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgCls); err != nil {
 		Errorf("error decoding message %v", err)
 		return nil
 	}
@@ -146,10 +197,6 @@ func DecodeSliceMessag(slice []byte) *Message {
 		Errorf("decode slice message error: %s", err)
 		return nil
 	}
-	if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgCls); err != nil {
-		Errorf("decode slice message error: %s", err)
-		return nil
-	}
 	if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgId); err != nil {
 		Errorf("decode slice message error: %s", err)
 		return nil
@@ -182,10 +229,6 @@ func EncodeMessage(m *Message) []byte {
 		Errorf("error encoding message %v", err)
 		return nil
 	}
-	if err := binary.Write(&msgbuf, binary.LittleEndian, m.MsgCls); err != nil {
-		Errorf("error encoding message %v", err)
-		return nil
-	}
 	if err := binary.Write(&msgbuf, binary.LittleEndian, m.MsgId); err != nil {
 		Errorf("error encoding message %v", err)
 		return nil
@@ -212,10 +255,9 @@ func EncodeMessage(m *Message) []byte {
 type Message struct {
 	MsgLen 	uint16
 	MsgFlag	uint8
-	MsgCls	uint8
 	MsgId 	uint16
 	MsgCode	uint8
-	MsgCtx  uint64
+	MsgCtx  uint32
 	Msgbuf  bytes.Buffer
 }
 
@@ -245,10 +287,9 @@ func (m *Message) CheckSize(){
 }
 
 //生产一个消息
-func (m *Message) General(id uint16, ctx uint64, data []byte) bool {
+func (m *Message) General(id uint16, ctx uint32, data []byte) bool {
 	m.MsgId = id
 	m.MsgCtx = ctx
-	m.MsgCls = MsgClsSelf
 	m.MsgFlag = MsgFlagLittle
 	if data != nil {
 		if _, err := m.Msgbuf.Write(data); err != nil {
