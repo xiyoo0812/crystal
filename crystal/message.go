@@ -16,10 +16,12 @@ const (
 	MsgFlagBoard	uint8	= 0x02		//广播
 	MsgFlagGroup	uint8	= 0x04		//指定组发
 	MsgFlagComp	uint8	= 0x08		//压缩
-	MsgFlagLittle	uint8	= 0x10		//小包
+	MsgFlagCtx		uint8	= 0x10		//上下文
+	MsgFlagSrc		uint8	= 0x20		//源
+	MsgFlagDst		uint8	= 0x40		//源
 	//消息头长度
-	MsgHeadLen	 	uint16 	= uint16(unsafe.Sizeof(uint16(0))) * 2 + uint16(unsafe.Sizeof(uint8(0))) * 2
-	MsgHeadLenBig 	uint16 	= uint16(unsafe.Sizeof(uint32(0)))
+	MsgHeadLen	 		uint16 	= uint16(unsafe.Sizeof(uint16(0))) * 2 + uint16(unsafe.Sizeof(uint8(0))) * 2
+	MsgHeadLenArg 		uint16 	= uint16(unsafe.Sizeof(uint32(0)))
 )
 
 // HandlerFunc serves as an adapter to allow the use of ordinary functions as handlers.
@@ -71,7 +73,7 @@ func DecodeWebMessag(conn *NetConn) *Message {
 				readBytes = append(readBytes, newBytes ...)
 			}
 		}
-		headBuf := bytes.NewReader(readBytes[0 : MsgHeadLen+MsgHeadLenBig])
+		headBuf := bytes.NewReader(readBytes)
 		if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgLen); err != nil {
 			Errorf("error decoding message %v", err)
 			return nil
@@ -89,9 +91,23 @@ func DecodeWebMessag(conn *NetConn) *Message {
 			return nil
 		}
 		headLen := MsgHeadLen
-		if !message.HasFlag(MsgFlagLittle) {
-			headLen += MsgHeadLenBig
+		if message.HasFlag(MsgFlagCtx) {
+			headLen += MsgHeadLenArg
 			if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgCtx); err != nil {
+				Errorf("error decoding message %v", err)
+				return nil
+			}
+		}
+		if message.HasFlag(MsgFlagSrc) {
+			headLen += MsgHeadLenArg
+			if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgSrc); err != nil {
+				Errorf("error decoding message %v", err)
+				return nil
+			}
+		}
+		if message.HasFlag(MsgFlagDst) {
+			headLen += MsgHeadLenArg
+			if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgDst); err != nil {
 				Errorf("error decoding message %v", err)
 				return nil
 			}
@@ -141,8 +157,8 @@ func DecodeMessag(conn *NetConn) *Message {
 		return nil
 	}
 	bodyLen := message.MsgLen - MsgHeadLen
-	if !message.HasFlag(MsgFlagLittle) {
-		headBytes := make([]byte, MsgHeadLenBig)
+	if message.HasFlag(MsgFlagCtx) {
+		headBytes := make([]byte, MsgHeadLenArg)
 		_, err = io.ReadFull(raw, headBytes)
 		if err != nil {
 			Errorf("error decoding message %v", err)
@@ -153,8 +169,36 @@ func DecodeMessag(conn *NetConn) *Message {
 			Errorf("error decoding message %v", err)
 			return nil
 		}
-		bodyLen -= MsgHeadLenBig
+		bodyLen -= MsgHeadLenArg
 		conn.encry.SetRecvKey(uint32(message.MsgCtx))
+	}
+	if message.HasFlag(MsgFlagSrc) {
+		headBytes := make([]byte, MsgHeadLenArg)
+		_, err = io.ReadFull(raw, headBytes)
+		if err != nil {
+			Errorf("error decoding message %v", err)
+			return nil
+		}
+		headBuf := bytes.NewReader(headBytes)
+		if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgSrc); err != nil {
+			Errorf("error decoding message %v", err)
+			return nil
+		}
+		bodyLen -= MsgHeadLenArg
+	}
+	if message.HasFlag(MsgFlagDst) {
+		headBytes := make([]byte, MsgHeadLenArg)
+		_, err = io.ReadFull(raw, headBytes)
+		if err != nil {
+			Errorf("error decoding message %v", err)
+			return nil
+		}
+		headBuf := bytes.NewReader(headBytes)
+		if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgDst); err != nil {
+			Errorf("error decoding message %v", err)
+			return nil
+		}
+		bodyLen -= MsgHeadLenArg
 	}
 	// read application data
 	msgBytes := make([]byte, bodyLen)
@@ -206,12 +250,26 @@ func DecodeSliceMessag(slice []byte) *Message {
 		return nil
 	}
 	headLen := MsgHeadLen
-	if !message.HasFlag(MsgFlagLittle) {
+	if message.HasFlag(MsgFlagCtx) {
 		if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgCtx); err != nil {
 			Errorf("decode slice message error: %s", err)
 			return nil
 		}
-		headLen += MsgHeadLenBig
+		headLen += MsgHeadLenArg
+	}
+	if message.HasFlag(MsgFlagSrc) {
+		if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgSrc); err != nil {
+			Errorf("decode slice message error: %s", err)
+			return nil
+		}
+		headLen += MsgHeadLenArg
+	}
+	if message.HasFlag(MsgFlagDst) {
+		if err := binary.Read(headBuf, binary.LittleEndian, &message.MsgDst); err != nil {
+			Errorf("decode slice message error: %s", err)
+			return nil
+		}
+		headLen += MsgHeadLenArg
 	}
 	// read application data
 	message.Msgbuf.Write(slice[headLen:])
@@ -237,8 +295,20 @@ func EncodeMessage(m *Message) []byte {
 		Errorf("error encoding message %v", err)
 		return nil
 	}
-	if !m.HasFlag(MsgFlagLittle) {
+	if m.HasFlag(MsgFlagCtx) {
 		if err := binary.Write(&msgbuf, binary.LittleEndian, m.MsgCtx); err != nil {
+			Errorf("error encoding message %v", err)
+			return nil
+		}
+	}
+	if m.HasFlag(MsgFlagSrc) {
+		if err := binary.Write(&msgbuf, binary.LittleEndian, m.MsgSrc); err != nil {
+			Errorf("error encoding message %v", err)
+			return nil
+		}
+	}
+	if m.HasFlag(MsgFlagDst) {
+		if err := binary.Write(&msgbuf, binary.LittleEndian, m.MsgDst); err != nil {
 			Errorf("error encoding message %v", err)
 			return nil
 		}
@@ -251,13 +321,14 @@ func EncodeMessage(m *Message) []byte {
 }
 
 // Message represents the structured data that can be handled.
-//兼容c++，暂定这个结构
 type Message struct {
 	MsgLen 	uint16
 	MsgFlag	uint8
 	MsgId 	uint16
 	MsgCode	uint8
 	MsgCtx  uint32
+	MsgSrc  uint32
+	MsgDst  uint32
 	Msgbuf  bytes.Buffer
 }
 
@@ -279,10 +350,16 @@ func (m *Message) RemoveFlag(flag uint8) {
 func (m *Message) CheckSize(){
 	m.MsgLen = uint16(m.Msgbuf.Len()) + MsgHeadLen
 	if m.MsgCtx > 0 {
-		m.MsgLen += MsgHeadLenBig
-		m.RemoveFlag(MsgFlagLittle)
-	} else {
-		m.AddFlag(MsgFlagLittle)
+		m.MsgLen += MsgHeadLenArg
+		m.AddFlag(MsgFlagCtx)
+	}
+	if m.MsgSrc > 0 {
+		m.MsgLen += MsgHeadLenArg
+		m.AddFlag(MsgFlagSrc)
+	}
+	if m.MsgDst > 0 {
+		m.MsgLen += MsgHeadLenArg
+		m.AddFlag(MsgFlagDst)
 	}
 }
 
@@ -290,7 +367,6 @@ func (m *Message) CheckSize(){
 func (m *Message) General(id uint16, ctx uint32, data []byte) bool {
 	m.MsgId = id
 	m.MsgCtx = ctx
-	m.MsgFlag = MsgFlagLittle
 	if data != nil {
 		if _, err := m.Msgbuf.Write(data); err != nil {
 			Errorf("message (%d) write string error: %s", id, err)

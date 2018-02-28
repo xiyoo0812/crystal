@@ -12,17 +12,12 @@ const (
 	defInterval = 100
 )
 
-var timerIds *AtomicInt64
-func init() {
-	timerIds = NewAtomicInt64(1000)
-}
-
 /* 'expiration' is the time when timer time out, if 'interval' > 0
 the timer will time out periodically, 'timeout' contains the callback
 to be called when times out */
 type Timer struct {
-	Id         	int64
-	Chan 		chan int64
+	Id         	uint64
+	Chan 		chan uint64
 	expiration 	time.Time
 	interval   	time.Duration
 }
@@ -38,7 +33,7 @@ func (t *Timer) Close() {
 
 // timerHeap is a heap-based priority queue
 type timerHeap []*Timer
-func (th timerHeap) Remove(id int64) int {
+func (th timerHeap) Remove(id uint64) int {
 	for i, t := range th {
 		if t.Id == id {
 			heap.Remove(&th, i)
@@ -78,7 +73,7 @@ type TimerWheel struct {
 	ticker      *time.Ticker
 	wg          *sync.WaitGroup
 	regChan     chan *Timer		// reg timer in loop
-	unregChan   chan int64      	// unreg timer in loop
+	unregChan   chan uint64      	// unreg timer in loop
 	ctx         context.Context
 	cancel      context.CancelFunc
 }
@@ -88,7 +83,7 @@ func NewTimerWheel(ctx context.Context, interval time.Duration) *TimerWheel {
 	if globalTimerWheel == nil {
 		timerWheel := &TimerWheel{
 			regChan	: make(chan *Timer, bufferSize),
-			unregChan: make(chan int64, bufferSize),
+			unregChan: make(chan uint64, bufferSize),
 			ticker	: time.NewTicker(time.Millisecond * interval),
 			timers	: make(timerHeap, 0),
 			wg		: &sync.WaitGroup{},
@@ -107,10 +102,10 @@ func NewTimerWheel(ctx context.Context, interval time.Duration) *TimerWheel {
 
 func NewTimer(elapsed time.Duration, interv time.Duration) *Timer {
 	return &Timer{
-		Id 			: timerIds.GetAndIncrement(),
+		Id 			: NewGuid(2000, 1),
 		expiration	: time.Now().Add(elapsed * time.Millisecond),
 		interval	: interv * time.Millisecond,
-		Chan		: make(chan int64),
+		Chan		: make(chan uint64),
 	}
 }
 
@@ -137,7 +132,7 @@ func (tw *TimerWheel) DeleteTimer(t *Timer) {
 }
 
 // UnregTimer cancels a timed task with specified timer ID.
-func (tw *TimerWheel) UnregTimer(timerID int64) {
+func (tw *TimerWheel) UnregTimer(timerID uint64) {
 	tw.unregChan <- timerID
 }
 

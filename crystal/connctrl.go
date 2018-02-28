@@ -6,12 +6,8 @@ import (
 	"context"
 	"net/http"
 	"websocket"
+	"time"
 )
-
-var netIdentifier *AtomicInt64
-func init() {
-	netIdentifier = NewAtomicInt64(1000)
-}
 
 // ConnCtrl  is a ConnCtrl to serve TCP requests.
 type ConnCtrl struct {
@@ -23,6 +19,11 @@ type ConnCtrl struct {
 	mu     		sync.Mutex 		// guards following
 	listener   	net.Listener
 	bufferSize 	uint32  // size of buffered channel
+
+	ConnectFuncImpl ConnectFunc
+	MessageFuncImpl MessageFunc
+	CloseFuncImpl 	CloseFunc
+	TaskFuncImpl 	TaskFunc
 }
 
 // NewConnCtrl returns a new ConnCtrl which has not started
@@ -41,9 +42,42 @@ func NewConnCtrl(ctx context.Context, connTtype	uint16, bufSize uint32) *ConnCtr
 	return s
 }
 
-func (s *ConnCtrl) CloseConn(id int64){
+// ConnectFunc sets a callback
+func (s *ConnCtrl) SetConnectFunc(connect ConnectFunc) {
+	s.ConnectFuncImpl = connect
+}
+
+// MessageFunc sets a callback
+func (s *ConnCtrl) SetMessageFunc(message MessageFunc) {
+	s.MessageFuncImpl = message
+}
+
+// MessageFunc sets a callback
+func (s *ConnCtrl) SetTaskFunc(task TaskFunc) {
+	s.TaskFuncImpl = task
+}
+
+// CloseFunc sets a callback
+func (s *ConnCtrl) SetCloseFunc(close CloseFunc) {
+	s.CloseFuncImpl = close
+}
+
+func (s *ConnCtrl) CloseConn(id uint64){
 	s.conns.Delete(id)
 	s.wg.Done()
+}
+
+func (s *ConnCtrl) CheckConn(tick int64) []uint64 {
+	var lost = []uint64{}
+	nowtick := time.Now().Unix()
+	s.conns.Range(func(k, v interface{}) bool {
+		c := v.(*NetConn)
+		if nowtick - c.heart >= tick {
+			lost = append(lost, c.netid)
+		}
+		return true
+	})
+	return lost
 }
 
 // ConnsSize returns connections size.
@@ -65,7 +99,7 @@ func (s *ConnCtrl) Broadcast(msg *Message) {
 }
 
 // Unicast unicasts message to a specified conn.
-func (s *ConnCtrl) Unicast(id int64, msg *Message) bool {
+func (s *ConnCtrl) Unicast(id uint64, msg *Message) bool {
 	v, ok := s.conns.Load(id)
 	if ok {
 		return v.(*NetConn).Write(msg)
@@ -75,7 +109,7 @@ func (s *ConnCtrl) Unicast(id int64, msg *Message) bool {
 }
 
 // Conn returns a ConnCtrl connection with specified ID.
-func (s *ConnCtrl) Conn(id int64) (*NetConn, bool) {
+func (s *ConnCtrl) Conn(id uint64) (*NetConn, bool) {
 	v, ok := s.conns.Load(id)
 	if ok {
 		return v.(*NetConn), ok
@@ -83,22 +117,25 @@ func (s *ConnCtrl) Conn(id int64) (*NetConn, bool) {
 	return nil, ok
 }
 
-func (s *ConnCtrl) Listen(address string) (bool, error) {
+func (s *ConnCtrl) Listen(address string) bool {
 	if s.listener != nil {
-		return false, ErrAreadyListen
+		Errorln("listen error aready listen\n")
+		return false
 	}
 	l, err := net.Listen("tcp", address)
 	if err != nil {
-		return false, err
+		Errorln("Listen Failed:", err)
+		return false
 	}
 	s.listener = l
 	Infof("start, net %s addr %s\n", l.Addr().Network(), l.Addr().String())
-	return true, nil
+	return true
 }
 
-func (s *ConnCtrl) Websocket(address, url string) (bool, error) {
+func (s *ConnCtrl) Websocket(address, url string) bool {
 	if s.listener != nil {
-		return false, ErrAreadyListen
+		Errorln("websocket error aready listen\n")
+		return false
 	}
 	wsHandler := func(w http.ResponseWriter, r *http.Request) {
 		var upgrader = websocket.Upgrader{
@@ -113,7 +150,7 @@ func (s *ConnCtrl) Websocket(address, url string) (bool, error) {
 			Errorln("Websocket Upgrade Failed:", err)
 			return
 		} else {
-			netid := netIdentifier.GetAndIncrement()
+			netid := NewGuid(1000, 1)
 			sc := NewWebConn(netid, s, rawConn)
 			s.conns.Store(netid, sc)
 			s.wg.Add(1) // this will be Done() in TCPConn.Close()
@@ -123,17 +160,18 @@ func (s *ConnCtrl) Websocket(address, url string) (bool, error) {
 	http.HandleFunc(url, wsHandler)
 	err := http.ListenAndServe(address, nil)
 	if err != nil {
-		return false, err
+		Errorln("Websocket ListenAndServe Failed:", err)
+		return false
 	}
-	return true, nil
+	return true
 }
 
-func (s *ConnCtrl) Accept() (bool, error) {
+func (s *ConnCtrl) Accept() bool {
 	for {
 		rawConn, err := s.listener.Accept()
 		if err != nil {
 			Errorf("accept error %v\n", err)
-			return false, err
+			return false
 		}
 		// how many connections do we have ?
 		sz := s.ConnsSize()
@@ -142,7 +180,7 @@ func (s *ConnCtrl) Accept() (bool, error) {
 			rawConn.Close()
 			continue
 		}
-		netid := netIdentifier.GetAndIncrement()
+		netid := NewGuid(1000, 2)
 		sc := NewNetConn(netid, s, rawConn)
 		s.conns.Store(netid, sc)
 
@@ -151,19 +189,21 @@ func (s *ConnCtrl) Accept() (bool, error) {
 		s.wg.Add(1) // this will be Done() in TCPConn.Close()
 		go sc.Start()
 	} // for loop
-	return true, nil
+	return true
 }
 
-func (s *ConnCtrl) Connect(address string) (bool, error) {
+func (s *ConnCtrl) Connect(address string) uint64 {
 	if s.listener != nil {
-		return false, ErrAreadyListen
+		Errorln("connect error aready listen\n")
+		return 0
 	}
 	rawConn, err := net.Dial("tcp", address)
 	if err != nil {
-		return false, err
+		Errorf("connect error %v\n", err)
+		return 0
 	}
 
-	netid := netIdentifier.GetAndIncrement()
+	netid := NewGuid(1000, 3)
 		sc := NewNetConn(netid, s, rawConn)
 	s.conns.Store(netid, sc)
 
@@ -171,7 +211,7 @@ func (s *ConnCtrl) Connect(address string) (bool, error) {
 
 	s.wg.Add(1) // this will be Done() in TCPConn.Close()
 	go sc.Start()
-	return true, nil
+	return netid
 }
 
 // Stop gracefully closes the ConnCtrl, it blocked until all connections

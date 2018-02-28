@@ -10,17 +10,17 @@ import (
 
 // NetConn represents a connection to a TCP server, it implments Conn.
 type NetConn struct {
-	netid   int64
+	netid   uint64
 	heart   int64
 	name    string
 	encry 	*Encryptor
 	once    *sync.Once
 	wg   	*sync.WaitGroup
 	send	*sync.WaitGroup
-	mu		sync.Mutex
 	ctrl	*ConnCtrl
-	rawConn net.Conn
 	webConn *websocket.Conn
+	rawConn net.Conn
+	mu		sync.Mutex
 	taskCh	chan context.Context
 	sendCh  chan []byte
 	handCh 	chan *Message
@@ -30,7 +30,7 @@ type NetConn struct {
 
 // NewTcpConn returns a new server connection which has not started to
 // serve requests yet.
-func NewNetConn(id int64, ct *ConnCtrl, c net.Conn) *NetConn {
+func NewNetConn(id uint64, ct *ConnCtrl, c net.Conn) *NetConn {
 	sc := &NetConn{
 		netid:    	id,
 		rawConn:   	c,
@@ -49,7 +49,7 @@ func NewNetConn(id int64, ct *ConnCtrl, c net.Conn) *NetConn {
 	return sc
 }
 
-func NewWebConn(id int64, ct *ConnCtrl, c *websocket.Conn) *NetConn {
+func NewWebConn(id uint64, ct *ConnCtrl, c *websocket.Conn) *NetConn {
 	sc := &NetConn{
 		netid:    	id,
 		webConn:   	c,
@@ -60,7 +60,7 @@ func NewWebConn(id int64, ct *ConnCtrl, c *websocket.Conn) *NetConn {
 		sendCh:    	make(chan []byte, ct.bufferSize),
 		handCh: 	make(chan *Message, MaxMessageQueue),
 		taskCh: 	make(chan context.Context, MaxTaskQueue),
-		heart:     	time.Now().UnixNano(),
+		heart:     	time.Now().Unix(),
 		encry:		new(Encryptor),
 	}
 	sc.ctx, sc.cancel = context.WithCancel(ct.ctx)
@@ -69,7 +69,7 @@ func NewWebConn(id int64, ct *ConnCtrl, c *websocket.Conn) *NetConn {
 }
 
 // NetID returns net ID of server connection.
-func (tc *NetConn) NetID() int64 {
+func (tc *NetConn) NetID() uint64 {
 	return tc.netid
 }
 
@@ -195,14 +195,14 @@ func readLoop(sc *NetConn, wg *sync.WaitGroup) {
 				if msg := DecodeMessag(sc); msg == nil {
 					return
 				} else {
-					sc.SetHeartBeat(time.Now().UnixNano())
+					sc.SetHeartBeat(time.Now().Unix())
 					sc.handCh <- msg
 				}
 			} else {
 				if msg := DecodeWebMessag(sc); msg == nil {
 					return
 				} else {
-					sc.SetHeartBeat(time.Now().UnixNano())
+					sc.SetHeartBeat(time.Now().Unix())
 					sc.handCh <- msg
 				}
 			}
@@ -252,14 +252,18 @@ func handleLoop(sc *NetConn, wg *sync.WaitGroup) {
 			Errorf("handleLoop panics: %v\n", p)
 		}
 		// callback on close
-		if CloseFuncImpl != nil {
+		if sc.ctrl.CloseFuncImpl != nil {
+			sc.ctrl.CloseFuncImpl(sc)
+		} else if CloseFuncImpl != nil {
 			CloseFuncImpl(sc)
 		}
 		sc.Close()
 		wg.Done()
 	}()
 	//处理协程返回
-	if ConnectFuncImpl != nil {
+	if sc.ctrl.ConnectFuncImpl != nil {
+		sc.ctrl.ConnectFuncImpl(sc)
+	} else if ConnectFuncImpl != nil {
 		ConnectFuncImpl(sc)
 	}
 	for {
@@ -267,7 +271,9 @@ func handleLoop(sc *NetConn, wg *sync.WaitGroup) {
 		case <-sc.ctx.Done(): // connection closed
 			return
 		case ctx := <-sc.taskCh:
-			if TaskFuncImpl != nil {
+			if sc.ctrl.TaskFuncImpl != nil {
+				sc.ctrl.TaskFuncImpl(ctx, sc)
+			} else if TaskFuncImpl != nil {
 				TaskFuncImpl(ctx, sc)
 			} else {
 				Warnln("no handler for task %d\n")
@@ -275,7 +281,9 @@ func handleLoop(sc *NetConn, wg *sync.WaitGroup) {
 		case msg := <-sc.handCh:
 			handler := GetMeaageHandler(msg.MsgId)
 			if handler == nil {
-				if MessageFuncImpl != nil {
+				if sc.ctrl.MessageFuncImpl != nil {
+					sc.ctrl.MessageFuncImpl(msg, sc)
+				} else if MessageFuncImpl != nil {
 					MessageFuncImpl(msg, sc)
 				} else {
 					Warnf("no handler for message %d\n", msg.MsgId)
